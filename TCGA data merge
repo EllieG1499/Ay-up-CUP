@@ -1,0 +1,81 @@
+##
+#####merge all the downloaded GDC beta files
+##
+setwd("C:/Users/genexg/OneDrive - NHS/Documents")
+##
+##find the beta files for the GDC data
+all_files <- list.files(  ####all_files will become a character vector of all the filepaths
+  path = "GDCdata", 
+  pattern = "level3betas\\.txt$",
+  recursive = TRUE, ###looks into all the sub files - which is needed with all the files being within different project folders
+  full.names = TRUE ##brings back full names so i can keep track of each project
+)
+###indicate the number of files in this location
+cat("Number of files found:", length(all_files), "\n")
+if(length(all_files) == 0){
+  stop("No level3betas.txt files were found under GDCdata/") ###checks id the all_files is empty - as a safety check
+}
+###define a function to read beta_file for one file to then apply to all files
+read_beta_file <- function(f){ ##read one file
+  x <- read.delim(f, stringsAsFactors = FALSE, check.names = FALSE)  ##reads this specific file format into R (tab dleimited text)
+  if(ncol(x) <2){
+    stop("File does not have atleast 2 columns:", f)
+  }
+  sample_id <- sub("\\.methylation_array.$*", "", basename(f))
+ out <- data.frame( 
+    probe_id = x[[1]], 
+    beta = suppressWarnings(as.numeric(x[[2]])),
+    stringsAsFactors = FALSE
+  ) 
+ return(out)
+ colnames(out)[2] <- sample_id
+} ####the purpose is to read one beta file and then make it into a simple 2 column 
+    ####data frame with probe id in column 1 and beta values for that sample in column 2
+
+###define the function to extract one project to then apply to all projects
+extract_project <- function(f){
+  parts <- strsplit(normalizePath(f, winslash = "/"), "/")[[1]]   ##converts the file path to a normal path with forward slashes and splits the path into pieces based on the slashes
+  gdc_idx <- match("GDCdata", parts) ##this finds position of the file path where GDCdata is
+  if (!is.na(gdc_idx) && gdc_idx < length(parts)) {
+    return(parts[gdc_idx + 1]) ###this then looks directly at the element after GDCdata because that is ewhere th eproject name will be
+  }
+  NA_character_ ##if something goes wrong, then reutrn NA
+}
+
+####define a function to extract a smaple barcode to then apply to all samples
+extract_sample_barcode <- function(f) {
+  sub("\\.methylation_array.*$", "", basename(f))
+}
+
+###build the sample metadata table
+sample_info <- data.frame(
+  file.path = all_files,
+  project = vapply(all_files, extract_project, character(1)),
+  samplie_id = vapply(all_files, extract_sample_barcode, character(1)), ##runs the extrcation of the project function on every file path
+  stringsAsFactors = FALSE
+)
+
+###read the first file and start the merged matrix 
+first_df <- read_beta_file(all_files[1])    ###reads the first file using the read beta file funciton i made
+beta_all <- as.matrix(first_df[, 2, drop = FALSE]) ###takes only the second column which contains the sample's beta values and converts it to a matrix
+rownames(beta_all) <- first_df$probe_id ###sets the row names of the matric to the Probe ids
+
+###now i need to loop through all the remaining files
+for(i in 2:length(all_files)){ ###loops over all but the fits file
+  df_i <- read_beta_file(all_files[i]) ###reads the file in df_i
+  idx <- match(rownames(beta_all), df_i$probe_id) ###this aligns the current files probes t the master probe order defined by the first file. 
+  vec_i <- df_i[idx,2] ##reorders the current samples beta values to match the row order of beta_all
+  beta_all <- cbind(beta_all, vec_i)  ##vec_i is now a vector which has all the beta values in the correct probe order. Adds the current sample as the new column to the big matric
+  colnames(beta_all)[ncol(beta_all)] <- names(df_i)[2] ##names the newly added column with the sample ID. 
+  if (i %% 10 == 0 || i == length(all_files)){
+    cat("Loaded", i, "of", length(all_files), "files\n") ###this will just print every 10 files to confirm all is going well
+  }
+}
+saveRDS(beta_all, "TCGA_all_projects_450k_beta_merged.rds")  ##save down the large meth matrix
+
+###save the smaple metadata file
+write.csv(sample_info, "TCGA_all_projects_metadata.csv", row.names = FALSE) ###writes the metadata into a CSV file
+
+###final message
+cat("Saved merged matric and sample metadata.\n")
+
