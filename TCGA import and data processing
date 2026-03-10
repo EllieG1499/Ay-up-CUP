@@ -1,0 +1,121 @@
+###install TCGA
+if(!require("BiocManager"))
+  install.packages("BiocManager")
+BiocManager::install("TCGAbiolinks")
+library(TCGAbiolinks)
+ set.seed(1)
+N_PER_PROJECT <- 100
+  projects <- c("TCGA-LUAD","TCGA-LUSC", "TCGA-PAAD", "TCGA-COAD", "TCGA-READ",
+                "TCGA-BRCA", "TCGA-KIRC", "TCGA-KIRP", "TCGA-KICH", "TCGA-OV", "TCGA-STAD", "TCGA-ESCA", "TCGA-BLCA", "TCGA-LIHC", "TCGA-CHOL")
+  ####download into local path
+  setwd("C:/Users/genexg/OneDrive - NHS/Documents")
+  download_queries <- list()
+  
+  ##skip LUAD if you already have it 
+  projects_to_download <- setdiff(projects, "TCGA-LUAD")
+  
+  for (p in projects_to_download) {
+    message("\n===", p, "===")
+  q_all <- GDCquery(
+  project = p,
+  data.category = "DNA Methylation",
+  data.type = "Methylation Beta Value",
+  platform = "Illumina Human Methylation 450",
+  sample.type = "Primary Tumor"
+)
+  res <- getResults(q_all)
+  
+  ###cases/patients for this query
+cases <- unique(res$cases)
+n_cases <- length(cases)
+message("Primary Tumor cases available", n_cases)
+
+if (n_cases == 0){
+  warning("No cases found for ", p, "(check platform/type). Skipping.")
+  next
+}
+####pcik up to N_per_project cases
+picked_cases <- sample(cases, min(N_PER_PROJECT, n_cases))
+
+###resitrict the gdc query to those cases
+q_sub <- GDCquery(
+  project = p, 
+  data.category = "DNA Methylation",
+  data.type = "Methylation Beta Value",
+  platform = "Illumina Human Methylation 450",
+  sample.type = "Primary Tumor",
+  barcode = picked_cases
+)
+message("Files to download for ",p, ":", nrow(getResults(q_sub)))
+        
+###download 
+GDCdownload(
+  q_sub, 
+  method = "api", 
+  files.per.chunk = 1
+)
+download_queries[[p]] <- q_sub
+}
+  
+ saveRDS(download_queries, "download_queries_primary_tumor_100_remaining.rds") 
+
+##luad_files <- list.files(
+  #"GDCdata/TCGA-LUAD", 
+  #recursive = TRUE, 
+  #pattern = "level3betas\\.txt$",
+  #full.names = TRUE
+#)
+
+###building beta matrix for TCGA LUad
+build_beta_matrix <- function(files) {
+  stopifnot(length(files) > 0)
+  
+  ##read the first file to set thre probe order
+  x1 <- read.delim(files[1], stringsAsFactors = FALSE)
+  probes <- x1[[1]]
+  mat <- matrix(as.numeric(x1[[2]]), ncol = 1)
+  rownames(mat) <- probes 
+  colnames(mat) <- sub("\\.methylation_array.*$", "", basename(files[1]))
+  
+  ##add the rest 
+  for (i in 2:length(files)) {
+    xi <- read.delim(files[i], stringsAsFactors = FALSE)
+    
+  ###Align by probe ID
+    idx <- match(rownames(mat), xi[[1]])
+    mat <- cbind(mat, as.numeric(xi[[2]][idx]))
+    colnames(mat)[ncol(mat)] <- sub("\\.methylation_array.*$", "", basename(files[i]))
+  if (i %% 10 == 0) message("Loaded", i, "/", length(files)) 
+  }
+  mat
+}
+build_and_save_project <- function(project, out_dir = "beta matrices") {
+  dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+  
+  files <- list.files(
+   file.path("GDCdata", project), 
+      recursive = TRUE, 
+      pattern = "level3betas\\.txt$",
+      full.names = TRUE
+  )
+  message("\n==", project, "== files: ", length(files))
+  if (length(files) == 0){
+    warning("No beta files found for ", project, ". Skipping.")
+  return(invisible(NULL))
+  }
+  beta <- build_beta_matrix(files)
+  out_file <- file.path(out_dir, paste0(project, "_450_beta.rds"))
+  saveRDS(beta, out_file)
+  message("Saved: ", out_file, " dim=", paste(dim(beta), collapse = "x"))
+  invisible(out_file)
+}
+projects_to_build <- setdiff(projects, "TCGA-LUAD")
+lapply(projects_to_build, build_and_save_project)
+
+rds_files <- list.files("beta matrices", pattern = "\\.rds$", full.names = TRUE)
+mats <- lapply(rds_files, readRDS)
+
+saveRDS(beta_all, "TCGA_all_projects_450k_beta_merged.rds")
+head("TCGA_all_projects_450k_beta_merged.rds")
+dim("TCGA_all_projects_450k_beta_merged.rds")
+
