@@ -1,0 +1,177 @@
+# ------------------------------------------
+# External validation of final RF model
+# ------------------------------------------
+
+library(randomForest)
+
+setwd("C:/Users/genexg/OneDrive - NHS/Documents")
+
+# ------------------------------------------
+# 1. Load final trained model and selected probes
+# ------------------------------------------
+rf_model <- readRDS("results/rf_final_model.rds")
+top_probes <- readRDS("results/top_probes_RF_model.rds")
+
+# ------------------------------------------
+# 2. Load external EPIC beta matrix
+# This .RData file contains an object called beta_values
+# ------------------------------------------
+load("results/beta_values_filtered_EPIC_test_set.RData")
+
+# rename clearly
+beta_external <- beta_values
+
+# check structure
+cat("External beta matrix dimensions:\n")
+print(dim(beta_external))
+cat("First probe IDs:\n")
+print(head(rownames(beta_external)))
+cat("First sample IDs:\n")
+print(head(colnames(beta_external)))
+
+# ------------------------------------------
+# 3. Find overlap with training model probes
+# ------------------------------------------
+common_probes <- intersect(top_probes, rownames(beta_external))
+missing_probes <- setdiff(top_probes, rownames(beta_external))
+
+cat("Number of model probes:", length(top_probes), "\n")
+cat("Common probes in external data:", length(common_probes), "\n")
+cat("Missing probes in external data:", length(missing_probes), "\n")
+
+# ------------------------------------------
+# 4. Build external matrix with ALL training probes
+# Missing probes are added as NA rows
+# ------------------------------------------
+na_mat <- matrix(
+  NA_real_,
+  nrow = length(missing_probes),
+  ncol = ncol(beta_external),
+  dimnames = list(missing_probes, colnames(beta_external))
+)
+
+beta_external_full <- rbind(
+  beta_external[common_probes, , drop = FALSE],
+  na_mat
+)
+
+# reorder exactly to match the training probe order
+beta_external_full <- beta_external_full[top_probes, , drop = FALSE]
+
+stopifnot(identical(rownames(beta_external_full), top_probes))
+
+# ------------------------------------------
+# 5. Load training beta matrix to get probe medians
+# Used to fill probes missing entirely from EPIC external set
+# ------------------------------------------
+beta_train <- readRDS("results/beta_values_filtered_fixednames.rds")
+beta_train_sub <- beta_train[top_probes, , drop = FALSE]
+
+train_probe_medians <- apply(beta_train_sub, 1, median, na.rm = TRUE)
+
+# ------------------------------------------
+# 6. Impute any missing values
+# ------------------------------------------
+for (i in seq_len(nrow(beta_external_full))) {
+  miss <- is.na(beta_external_full[i, ])
+  if (any(miss)) {
+    if (any(!miss)) {
+      beta_external_full[i, miss] <- median(beta_external_full[i, !miss], na.rm = TRUE)
+    } else {
+      beta_external_full[i, miss] <- train_probe_medians[i]
+    }
+  }
+}
+
+cat("Remaining NA values after imputation:", sum(is.na(beta_external_full)), "\n")
+
+# ------------------------------------------
+# 7. Transpose into sample x feature format
+# ------------------------------------------
+external_df <- as.data.frame(t(beta_external_full))
+
+cat("External model dataframe dimensions:\n")
+print(dim(external_df))
+
+# ------------------------------------------
+# 8. Predict tumour type
+# ------------------------------------------
+predictions <- predict(rf_model, external_df)
+
+cat("Missing predictions:\n")
+print(table(is.na(predictions)))
+
+pred_df <- data.frame(
+  SampleID = rownames(external_df),
+  PredictedTumour = as.character(predictions),
+  stringsAsFactors = FALSE
+)
+
+write.csv(pred_df, "results/external_predictions_raw.csv", row.names = FALSE)
+
+# ------------------------------------------
+# 9. Load diagnosis file
+# ------------------------------------------
+diagnosis_file <- "C:/Users/genexg/OneDrive - NHS/Project/project data record/diagnosis_file.csv"
+diagnosis_info <- read.csv(diagnosis_file, stringsAsFactors = FALSE)
+
+# ------------------------------------------
+# FIX SAMPLE ID FORMAT
+# prediction IDs look like CUP0101_R01C01
+# diagnosis IDs look like CUP0101
+# ------------------------------------------
+
+pred_df$SampleID_short <- trimws(sub("_.*", "", pred_df$SampleID))
+diagnosis_info$SampleID <- trimws(as.character(diagnosis_info$SampleID))
+
+results_df <- merge(
+  pred_df,
+  diagnosis_info,
+  by.x = "SampleID_short",
+  by.y = "SampleID"
+)
+
+cat("Merged samples:", nrow(results_df), "\n")
+print(head(results_df))
+
+cat("Merged samples:", nrow(results_df), "\n")
+head(results_df)
+
+pred_to_organ <- c(
+  "TCGA-BRCA" = "Breast",
+  "TCGA-LUAD" = "Lung",
+  "TCGA-LUSC" = "Lung",
+  "TCGA-PAAD" = "Pancreas",
+  "TCGA-COAD" = "Colorectal",
+  "TCGA-READ" = "Colon",
+  "TCGA-KIRC" = "Kidney",
+  "TCGA-KIRP" = "Kidney",
+  "TCGA-KICH" = "Kidney",
+  "TCGA-OV"   = "Ovary",
+  "TCGA-STAD" = "Stomach",
+  "TCGA-ESCA" = "Oesophagus",
+  "TCGA-BLCA" = "Bladder",
+  "TCGA-LIHC" = "Liver",
+  "TCGA-CHOL" = "Liver"
+)
+
+results_df$PredictedOrgan <- unname(pred_to_organ[results_df$PredictedTumour])
+
+# ------------------------------------------
+# 10. Evaluate at organ level
+# ------------------------------------------
+conf_mat <- table(
+  Predicted = results_df$PredictedOrgan,
+  Actual = results_df$OrganType
+)
+
+accuracy <- sum(diag(conf_mat)) / sum(conf_mat)
+
+cat("External organ-level accuracy:", round(accuracy, 4), "\n")
+print(conf_mat)
+
+# ------------------------------------------
+# 11. Save final results
+# ------------------------------------------
+write.csv(results_df, "results/external_predictions_with_labels.csv", row.names = FALSE)
+write.csv(as.data.frame(as.table(conf_mat)), "results/external_confusion_matrix.csv", row.names = FALSE)
