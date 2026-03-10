@@ -1,0 +1,124 @@
+library(randomForest)
+library(matrixStats)
+
+set.seed(42)
+
+N <- 10000
+ntrees <- 500
+
+setwd("C:/Users/genexg/OneDrive - NHS/Documents")
+
+beta_train <- readRDS("results/beta_values_filtered_fixednames.rds")
+beta_geo <- readRDS("results/GEO_ovarian_filtered_beta.rds")
+
+common_probes <- intersect(rownames(beta_train), rownames(beta_geo))
+
+beta_train <- beta_train[common_probes, , drop = FALSE]
+beta_geo   <- beta_geo[common_probes, , drop = FALSE]
+
+cat("TCGA dims after alignment:", dim(beta_train), "\n")
+cat("GEO dims after alignment:", dim(beta_geo), "\n")
+
+beta_train_extended <- cbind(beta_train, beta_geo)
+
+cat("Merged training dims:", dim(beta_train_extended), "\n")
+cat("Total NA in merged matrix before imputation:", sum(is.na(beta_train_extended)), "\n")
+
+# impute missing values probe-by-probe using the probe median
+for (i in seq_len(nrow(beta_train_extended))) {
+  miss <- is.na(beta_train_extended[i, ])
+  if (any(miss)) {
+    beta_train_extended[i, miss] <- median(beta_train_extended[i, !miss], na.rm = TRUE)
+  }
+}
+
+cat("Total NA in merged matrix after imputation:", sum(is.na(beta_train_extended)), "\n")
+
+stopifnot(sum(is.na(beta_train_extended)) == 0)
+
+meta_tcga <- readRDS("TCGA_all_projects_metadata_enriched_fixednames.rds")
+meta_tcga <- meta_tcga[match(colnames(beta_train), meta_tcga$sample_id), , drop = FALSE]
+stopifnot(all(colnames(beta_train) == meta_tcga$sample_id))
+
+meta_geo <- data.frame(
+  sample_id = colnames(beta_geo),
+  project = "TCGA-OV",
+  stringsAsFactors = FALSE
+)
+
+meta_train <- rbind(
+  meta_tcga[, c("sample_id", "project"), drop = FALSE],
+  meta_geo[, c("sample_id", "project"), drop = FALSE]
+)
+
+meta_train <- meta_train[match(colnames(beta_train_extended), meta_train$sample_id), , drop = FALSE]
+stopifnot(all(colnames(beta_train_extended) == meta_train$sample_id))
+
+beta_df <- as.data.frame(t(beta_train_extended))
+beta_df$Class <- as.factor(meta_train$project)
+beta_df$SampleID <- meta_train$sample_id
+
+cat("Class counts:\n")
+print(table(beta_df$Class))
+
+feature_cols <- setdiff(colnames(beta_df), c("Class", "SampleID"))
+
+train_matrix <- as.matrix(beta_df[, feature_cols, drop = FALSE])
+storage.mode(train_matrix) <- "numeric"
+
+# --------------------------------------------------
+# 8. Feature selection directly on probe matrix
+# --------------------------------------------------
+probe_var <- matrixStats::rowVars(beta_train_extended)
+
+top_probes <- rownames(beta_train_extended)[order(probe_var, decreasing = TRUE)][1:min(N, nrow(beta_train_extended))]
+
+cat("Top probe count:", length(top_probes), "\n")
+print(head(top_probes))
+
+saveRDS(top_probes, "results/top_probes_RF_model_extended.rds")
+
+# --------------------------------------------------
+# 9. Build final training matrix from selected probes
+# --------------------------------------------------
+x <- t(beta_train_extended[top_probes, , drop = FALSE])
+x <- as.data.frame(x, check.names = FALSE)
+
+# force every predictor column to numeric
+x[] <- lapply(x, as.numeric)
+
+# response
+y <- as.factor(meta_train$project)
+
+# checks
+cat("Predictor matrix dimensions:", dim(x), "\n")
+cat("Response length:", length(y), "\n")
+cat("Total predictor NA:", sum(is.na(x)), "\n")
+cat("Total response NA:", sum(is.na(y)), "\n")
+cat("Any infinite values:", sum(!is.finite(as.matrix(x))), "\n")
+
+stopifnot(nrow(x) == length(y))
+stopifnot(sum(is.na(x)) == 0)
+stopifnot(sum(is.na(y)) == 0)
+stopifnot(sum(!is.finite(as.matrix(x))) == 0)
+
+train_final <- cbind(Class = y, x)
+
+# --------------------------------------------------
+# 10. Train final RF
+# --------------------------------------------------
+rf_final_extended <- randomForest(
+  x = x,
+  y = y,
+  ntree = ntrees,
+  mtry = floor(sqrt(ncol(x))),
+  importance = TRUE
+)
+
+saveRDS(rf_final_extended, "results/rf_final_model_extended.rds")
+saveRDS(beta_train_extended, "results/beta_training_with_GEO_ovarian.rds")
+saveRDS(meta_train, "results/meta_training_with_GEO_ovarian.rds")
+
+cat("Retraining complete.\n")
+cat("Predictor dimensions:", dim(x), "\n")
+cat("Model saved to: results/rf_final_model_extended.rds\n")
