@@ -1,0 +1,139 @@
+
+# reload the metadata
+meta <- readRDS("TCGA_all_projects_metadata_enriched.rds")
+
+# rebuild sample_id from file.path
+meta$sample_id <- sub("\\.methylation_array.*$", "", basename(meta$file.path))
+
+# check
+head(meta$sample_id, 10)
+sum(is.na(meta$sample_id))
+length(unique(meta$sample_id))
+
+# reload filtered matrix
+beta_values <- readRDS("results/beta_values_filtered.rds")
+
+# assign correct sample IDs to matrix columns
+colnames(beta_values) <- meta$sample_id
+
+# verify
+head(colnames(beta_values), 10)
+all(colnames(beta_values) == meta$sample_id)
+
+# save repaired versions
+saveRDS(beta_values, "results/beta_values_filtered_fixednames.rds")
+saveRDS(meta, "TCGA_all_projects_metadata_enriched_fixednames.rds")
+write.csv(meta, "TCGA_all_projects_metadata_enriched_fixednames.csv", row.names = FALSE)
+
+###Load the sample data 
+library(randomForest)
+library(caret)
+library(matrixStats)
+library(dplyr)
+
+set.seed(42)
+
+#setting the parameters
+folds <- 5
+ntrees <- 500
+N <- 10000   # number of probes used for feature selection
+
+beta_values <- readRDS("results/beta_values_filtered_fixednames.rds")
+meta <- readRDS("TCGA_all_projects_metadata_enriched_fixednames.rds")
+
+####aligning of the metadata with the mehtylation matrix 
+meta <- meta[match(colnames(beta_values), meta$sample_id), ]
+stopifnot(all(colnames(beta_values) == meta$sample_id))
+
+###build a datafram for modelling
+beta_df <- as.data.frame(t(beta_values))
+beta_df$Class <- as.factor(meta$project)   # tumour type
+beta_df$SampleID <- meta$sample_id
+
+####create the folds for the cross val
+fold_indices <- createFolds(beta_df$Class, k = folds, list = TRUE)
+
+##create objects for storage of output data
+accuracies <- numeric(folds)
+confusion_matrices <- list()
+cv_predictions <- data.frame()
+
+###CV loop code
+for (k in seq_len(folds)) {
+  
+  cat("Running fold", k, "\n")
+  
+  test_idx <- fold_indices[[k]]
+  train_idx <- setdiff(seq_len(nrow(beta_df)), test_idx)
+  
+  train_df <- beta_df[train_idx, ]
+  test_df  <- beta_df[test_idx, ]
+  
+  feature_cols <- setdiff(colnames(train_df), c("Class","SampleID"))
+  
+  # -------- Feature selection --------
+  train_matrix <- as.matrix(train_df[, feature_cols])
+  
+  probe_var <- apply(train_matrix, 2, var)
+  
+  top_probes <- names(sort(probe_var, decreasing = TRUE))[1:min(N,length(probe_var))]
+  
+  train_fs <- train_df[, c("Class", top_probes)]
+  test_fs  <- test_df[, c("Class", top_probes)]
+  
+  # -------- Random forest --------
+  rf_model <- randomForest(
+    Class ~ .,
+    data = train_fs,
+    ntree = ntrees,
+    mtry = floor(sqrt(length(top_probes))),
+    importance = TRUE
+  )
+  
+  # -------- Prediction --------
+  preds <- predict(rf_model, test_fs)
+  
+  fold_cm <- table(Predicted = preds, Actual = test_fs$Class)
+  
+  acc <- sum(diag(fold_cm)) / sum(fold_cm)
+  
+  accuracies[k] <- acc
+  confusion_matrices[[k]] <- fold_cm
+  
+  cv_predictions <- rbind(
+    cv_predictions,
+    data.frame(
+      SampleID = test_df$SampleID,
+      Actual = test_df$Class,
+      Predicted = preds,
+      Fold = k
+    )
+  )
+  
+  cat("Fold accuracy:", round(acc,4), "\n\n")
+}
+
+###Evaluate the performance of the RF
+mean_acc <- mean(accuracies)
+sd_acc <- sd(accuracies)
+
+cat("Mean CV Accuracy:", round(mean_acc,4), "\n")
+cat("SD Accuracy:", round(sd_acc,4), "\n")
+
+###output the combined confusion matrix
+combined_cm <- Reduce("+", confusion_matrices)
+print(combined_cm)
+
+###further metrics
+library(caret)
+cm <- confusionMatrix(combined_cm)
+metrics <- as.data.frame(cm$byClass)
+metrics$Class <- rownames(metrics)
+metrics <- metrics[, c("Class","Sensitivity","Specificity","Pos Pred Value","F1")]
+colnames(metrics)[4] <- "Precision"
+
+write.csv(metrics,"results/classifier_metrics_450.csv",row.names=FALSE)
+
+##save the predictions
+
+write.csv(cv_predictions,"results/cv_predictions_450.csv",row.names=FALSE)
