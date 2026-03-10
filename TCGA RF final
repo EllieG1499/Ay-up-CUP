@@ -1,0 +1,48 @@
+###load the training data 
+library(randomForest)
+library(matrixStats)
+setwd("C:/Users/genexg/OneDrive - NHS/Documents")
+set.seed(42)
+
+N <- 10000
+ntrees <- 500
+
+beta_values <- readRDS("results/beta_values_filtered_fixednames.rds")
+meta <- readRDS("TCGA_all_projects_metadata_enriched_fixednames.rds")
+
+meta <- meta[match(colnames(beta_values), meta$sample_id), ]
+
+stopifnot(all(colnames(beta_values) == meta$sample_id))
+
+###build the traininf data frame 
+beta_df <- as.data.frame(t(beta_values))
+
+beta_df$Class <- as.factor(meta$project)
+beta_df$SampleID <- meta$sample_id
+
+###conduct freature selection on the full dataset
+feature_cols <- setdiff(colnames(beta_df), c("Class","SampleID"))
+
+train_matrix <- as.matrix(beta_df[, feature_cols])
+
+probe_var <- apply(train_matrix, 2, var)
+
+top_probes <- names(sort(probe_var, decreasing = TRUE))[1:min(N,length(probe_var))]
+
+###save the top probes to be used for the test set
+saveRDS(top_probes, "results/top_probes_RF_model.rds")
+
+###build he final training dataset
+train_final <- beta_df[, c("Class", top_probes)]
+
+###train the model
+rf_final <- randomForest(
+  Class ~ .,
+  data = train_final,
+  ntree = ntrees,
+  mtry = floor(sqrt(length(top_probes))),
+  importance = TRUE
+)
+
+##save the trained model 
+saveRDS(rf_final, "results/rf_final_model.rds")
