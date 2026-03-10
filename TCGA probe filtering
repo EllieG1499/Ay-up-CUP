@@ -1,0 +1,63 @@
+###pre-processing - TCGA 450K beta matrix - prepare methylation data for model
+rm(list=ls())
+options(stringAsFactors = FALSE, scipen = 999)
+
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install(c(
+  "IlluminaHumanMethylation450Kanno.ilmn12.hg19",
+  "IlluminaHumanMethylation450kmanifest"
+))
+library(data.table)
+library(matrixStats)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(IlluminaHumanMethylation450kmanifest)
+
+###load the meth matrix
+beta_values <- readRDS("TCGA_all_projects_450k_beta_merged.rds")
+sample_info <- read.csv("TCGA_all_projects_metadata_enriched.csv")
+cat("Initial matrix dimensions:", dim(beta_values), "\n")
+
+##we want to see rows are probes and columns as samples 
+##next to check any missing data
+cat("Total NA values:", sum(is.na(beta_values)), "\n")
+cat("Percent NA:", mean(is.na(beta_values))*100, "\n")
+
+###rmeove probes with more than 1% missing across all the samples
+beta_values <- beta_values[rowSums(is.na(beta_values)) == 0, ]
+cat("After removing remaining NA:", dim(beta_values), "\n")
+
+###variant filtering - rmeoving probes with low variance - uninformative for ML
+probe_var <- rowVars(beta_values)
+var_threshold <- quantile(probe_var, 0.25)
+beta_values <- beta_values[probe_var > var_threshold, ]
+cat("After variance filtering:", dim(beta_values), "\n")
+
+anno <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+common_probes <- intersect(rownames(beta_values), rownames(anno))
+beta_values <- beta_values[common_probes, , drop = FALSE]
+anno <- anno[common_probes, , drop = FALSE]
+cat("Probes after annotation alignment:", nrow(beta_values), "\n")
+
+###ensuring only CpG probes remain
+cpg_filter <- grepl("^cg", rownames(beta_values))
+beta_values <- beta_values[cpg_filter, , drop = FALSE]
+anno <- anno[cpg_filter, , drop = FALSE]
+cat("Canonical CpG probes retained:", nrow(beta_values), "\n")
+
+####remove the sex chromsomes
+xy_filter <- anno$chr %in% c("chrX", "chrY")
+
+###remove SNP-associated probes
+snp_filter <- !is.na(anno$Probe_rs) & anno$Probe_rs != ""
+
+###combine all the filters for filtering 
+bad_probes <- xy_filter | snp_filter
+stopifnot(length(bad_probes) == nrow(beta_values))
+beta_values <- beta_values[!bad_probes, , drop = FALSE]
+anno <- anno[!bad_probes, , drop = FALSE]
+cat("Final probes retained after XY/SNP filtering", nrow(beta_values), "\n")
+dir.create("results", showWarnings = FALSE)
+saveRDS(beta_values, "results/beta_values_filtered.rds")
+saveRDS(sample_info, "results/sample_metadata_enriched.rds")
