@@ -1,0 +1,109 @@
+if (!require("BiocManager")) install.packages("BiocManager")
+
+BiocManager::install(c(
+  "GEOquery",
+  "minfi",
+  "IlluminaHumanMethylation450kanno.ilmn12.hg19"
+))
+
+library(GEOquery)
+library(minfi)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+set.seed(1)
+
+# ------------------------------------------
+# 1. Download GEO series
+# ------------------------------------------
+gse_id <- "GSE65820"
+gse_list <- getGEO(gse_id, GSEMatrix = TRUE)
+gse <- gse_list[[1]]
+
+# ------------------------------------------
+# 2. Confirm platform is 450K
+# GPL13534 = Illumina HumanMethylation450
+# ------------------------------------------
+cat("Platform:", annotation(gse), "\n")
+
+if (annotation(gse) != "GPL13534") {
+  stop("This dataset is not 450K. Platform is: ", annotation(gse))
+}
+
+# ------------------------------------------
+# 3. Extract beta matrix and phenotype data
+# ------------------------------------------
+beta_geo <- exprs(gse)
+pheno <- pData(gse)
+
+cat("Initial dimensions:", dim(beta_geo), "\n")
+print(table(pheno$source_name_ch1, useNA = "ifany"))
+
+# ------------------------------------------
+# 4. Remove overlap samples if needed
+# Replace these with the GSM IDs you want excluded
+# ------------------------------------------
+overlap_gsms <- c("GSM3911862", "GSM3911863", "GSM3911864")
+
+keep <- !(rownames(pheno) %in% overlap_gsms)
+
+beta_geo <- beta_geo[, keep, drop = FALSE]
+pheno <- pheno[keep, , drop = FALSE]
+
+cat("After removing overlap:", dim(beta_geo), "\n")
+print(table(pheno$source_name_ch1, useNA = "ifany"))
+
+# ------------------------------------------
+# 5. Keep only primary tumours
+# This dataset is already ovarian, so do NOT filter on 'ovary'
+# ------------------------------------------
+primary_keep <- grepl("primary", pheno$source_name_ch1, ignore.case = TRUE)
+
+beta_geo <- beta_geo[, primary_keep, drop = FALSE]
+pheno <- pheno[primary_keep, , drop = FALSE]
+
+cat("After primary tumour filter:", dim(beta_geo), "\n")
+print(table(pheno$source_name_ch1, useNA = "ifany"))
+
+# ------------------------------------------
+# 6. Check beta-value range
+# Should usually be between 0 and 1
+# ------------------------------------------
+cat("Beta range:\n")
+print(range(beta_geo, na.rm = TRUE))
+
+# ------------------------------------------
+# 7. Randomly select 90 samples
+# ------------------------------------------
+n_target <- 80
+
+if (ncol(beta_geo) < n_target) {
+  stop("Only ", ncol(beta_geo), " primary tumour samples available, fewer than 90.")
+}
+
+sel <- sample(seq_len(ncol(beta_geo)), n_target)
+n_target <- min(80, ncol(beta_geo))
+
+sel <- sample(seq_len(ncol(beta_geo)), n_target)
+
+beta_geo <- beta_geo[, sel, drop = FALSE]
+pheno <- pheno[sel, , drop = FALSE]
+
+cat("Selected samples:", ncol(beta_geo), "\n")
+
+beta_geo <- beta_geo[, sel, drop = FALSE]
+pheno <- pheno[sel, , drop = FALSE]
+
+cat("After selecting 90 samples:", dim(beta_geo), "\n")
+
+# ------------------------------------------
+# 8. Save outputs
+# ------------------------------------------
+saveRDS(beta_geo, "results/GSE65820_ovarian_450k_primary_80_beta.rds")
+write.csv(pheno, "results/GSE65820_ovarian_450k_primary_80_metadata.csv", row.names = TRUE)
+
+# ------------------------------------------
+# 9. Quick checks
+# ------------------------------------------
+print(head(rownames(beta_geo)))
+print(head(colnames(beta_geo)))
+print(head(pheno[, 1:min(8, ncol(pheno))]))
