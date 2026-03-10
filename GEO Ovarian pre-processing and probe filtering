@@ -1,0 +1,65 @@
+### pre-processing - GEO ovarian 450K beta matrix
+rm(list = ls())
+options(stringAsFactors = FALSE, scipen = 999)
+
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install(c(
+  "IlluminaHumanMethylation450kanno.ilmn12.hg19",
+  "IlluminaHumanMethylation450kmanifest"
+))
+
+library(matrixStats)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(IlluminaHumanMethylation450kmanifest)
+
+### load the GEO ovarian beta matrix
+beta_values <- readRDS("results/GSE65820_ovarian_450k_primary_80_beta.rds")
+
+cat("Initial matrix dimensions:", dim(beta_values), "\n")
+
+## check missing data
+cat("Total NA values:", sum(is.na(beta_values)), "\n")
+cat("Percent NA:", mean(is.na(beta_values)) * 100, "\n")
+
+### remove probes with any missing values
+probe_missing <- rowMeans(is.na(beta_values))
+beta_values <- beta_values[probe_missing <= 0.05, , drop = FALSE]
+cat("After removing probes with >5% missing:", dim(beta_values), "\n")
+
+### annotation alignment
+anno <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+common_probes <- intersect(rownames(beta_values), rownames(anno))
+beta_values <- beta_values[common_probes, , drop = FALSE]
+anno <- anno[common_probes, , drop = FALSE]
+
+cat("Probes after annotation alignment:", nrow(beta_values), "\n")
+
+### keep only canonical CpG probes
+cpg_filter <- grepl("^cg", rownames(beta_values))
+beta_values <- beta_values[cpg_filter, , drop = FALSE]
+anno <- anno[cpg_filter, , drop = FALSE]
+
+cat("Canonical CpG probes retained:", nrow(beta_values), "\n")
+
+### remove sex chromosome probes
+xy_filter <- anno$chr %in% c("chrX", "chrY")
+
+### remove SNP-associated probes
+snp_filter <- !is.na(anno$Probe_rs) & anno$Probe_rs != ""
+
+### combine filters
+bad_probes <- xy_filter | snp_filter
+stopifnot(length(bad_probes) == nrow(beta_values))
+
+beta_values <- beta_values[!bad_probes, , drop = FALSE]
+anno <- anno[!bad_probes, , drop = FALSE]
+
+cat("Final probes retained after XY/SNP filtering:", nrow(beta_values), "\n")
+
+dir.create("results", showWarnings = FALSE)
+
+saveRDS(beta_values, "results/GEO_ovarian_filtered_beta.rds")
+
