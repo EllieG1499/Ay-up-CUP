@@ -1,0 +1,132 @@
+#---------------------------------------
+#Pre-processing: methylation Data 
+#
+#Cleans, normalises, and filters meth data
+#
+#--------------------------------------
+
+
+#clean environment and load the required libraries
+rm(list=ls())
+options(stringAsFactors = FALSE, scipen = 999) ##setting string as factors to false means R will not exprerss nreally small pr reas;y big numbers  in scientific notation, making it more visually digestible
+
+ifn (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install(version = "3.22")
+BiocManager::install(c(
+  "minfi",
+  "limma",
+  "GenomicRanges",
+  "GEOquery",
+  "IlluminaHumanMethylationEPICanno.ilm10b4.hg19",
+  "IlluminaHumanMethylationEPICmanifest"))
+install.packages(c(
+  "data.table",
+  "ggplot2",
+  "reshapre2", 
+  "randomForest",
+  "caret", 
+  "Rtsne"))
+
+#Load required libraries
+library(minfi)
+library(limma)
+library(data.table)
+library(GEOquery)
+library(ggplot2)
+library(reshape2)
+library(GenomicRanges)
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+library(IlluminaHumanMethylationEPICmanifest)
+
+#create a results directory 
+if (!dir.exists("results")) dir.create("results")  ##checks to see if the directory exists and if not creates a new directory
+
+#Define the file paths 
+idat_dir <- "C:\\Users\\genexg\\OneDrive - NHS\\Project\\project  raw data\\Current data" ##locates the IDAT files for the raw methylation data 
+diagnosis_file <- "C:/Users/genexg/OneDrive - NHS/Project/project data record/diagnosis_file.csv" ##defines tyhe path for the file that contrains the diagnosis data for each of the samples
+
+#Load sample metadata from the diagnosis file 
+diagnosis_info <- read.csv(diagnosis_file, stringsAsFactors = FALSE) ##loads the diagnosis file into the diagnosis_info variable.
+##This is to then be able to merge with the other data later on and link the sample's mewthylation data to the diagnosis. 
+
+#Read IDAT files 
+idat_files <- list.files(idat_dir, pattern = "(_Grn|_Red)\\.idat$", full.names = TRUE) ##lists all the files in the idat_dir directory whic match the _Grn.idat and _Red.idat pattern. 
+##The full.names=TRUE ensures the full pasth of the files is returned. 
+green_files <- list.files(idat_dir, pattern = "_Grn\\.idat$", full.names = TRUE) ##this lists all the files _Grn and .idat, returning the full filepath.
+sample_names <- sub("_Grn\\.idat$", "", basename(green_files)) ##Removes the _Grn.idat part from each filename, which leaves only the base sample name. 
+Basename <- file.path(idat_dir, sample_names) ##creates a new variable called basename, which is the full path for each of the samples base name. Then use of the code file.path(idat_dir, sample_names) combines the directory for the ida_dir with the base name sample, resulting in a complete path for each sample. 
+##For example CUP0101_R01C01_Grn.idat corresponds to a specific sample CUP0101_R01C01.
+
+
+
+targets <- data.frame(SampleID = sample_names, Basename = Basename, stringsAsFactor = FALSE) ##creates a dataframe names targets with two columns sample ID which contains the sample names and basename which is the full path to the sample minus the _Grn.idat
+
+#Load raw data
+RGset <- read.metharray.exp(targets = targets, verbose = TRUE, force = TRUE) ##using the targets data frame to read the merthylation data. Taking the basename = individual sample names and look for the idat files associated with that sample name. 
+##it finds both the red and green and loads them as one sample. The reason we only need the green to build the basenam,e is thast we stripped the _Grn.idat off the end to get the common part of the filename, then this is all we need as minfi will assume the red files are there too
+##this line loads the IDAT files into an object named RTgset - which is a data structure form ther minfi package designed to hold raw meth data
+
+#Normalise data 
+message("Running normalization", Sys.time())
+norm_data <- preprocessQuantile(RGset) ##performs quantile normalization on the raw methylation data that is stored in RGset.
+##The preprocessQuantile function aims to make the probe intensities more comparable.Resulting data is then stored in norm_data.
+
+# Convert to beta values
+beta_values <- getBeta(norm_data) ##extracts beta values from the normalized meth data object (norm_data). 
+##The Beta values are the most common way of representing DNA methylation levels at each CpG site, ranging from 0(unmethylated to 1 (fully methylated)
+#How many missing values does my data have 
+sum(is.na(beta_values))
+
+#What does this look like a a percentage
+mean(is.na(beta_values)) * 100 ##calculates the percentage of values missing from the data. This will determine if the absent values are small enough to omit.
+##General rule, if there is <1%, then this is fine to omit, and has no big impact. 1-5% = still ok to omit but be cautious if dataset is small. 5-10% consider imputation and >10% = consider more advanced filtering 
+
+###find missing probes which are prevelant in over 1% and remove 
+probes_missing <- rowMeans(is.na(beta_values))
+beta_values <- beta_values[probes_missing <= 0.01, ]
+
+##removing probes with any NA values
+beta_values <- beta_values[rowSums(is.na(beta_values)) == 0, ]
+
+##match annotation to beta values 
+anno <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+common_probes <- intersect(rownames(beta_values), rownames(anno))
+beta_values <- beta_values[common_probes, , drop = FALSE ]
+anno <- anno[common_probes, , drop = FALSE]
+
+##save down probe count after annotation alignment
+aligned_probe_count <- nrow(beta_values)
+
+#keep only cpg probes
+cpg_filter <- grepl("^cg", rownames(anno))
+##further filter by only keeping CpG prpbes 
+beta_values <- beta_values[cpg_filter, , drop = FALSE]
+anno <- anno[cpg_filter, , drop = FALSE]
+cpg_only_probe_count <- nrow(beta_values)
+
+#define the probe filters to be used (sex chromsomes, SNP filters, ambiguous gene mapping
+xy_filter <- anno$chr %in% c("chrX", "chrY")                              
+snp_filter <- !is.na(anno$Probe_rs) & anno$Probe_rs != ""                            
+
+
+#combine all filters
+bad_probes <- xy_filter | snp_filter
+##check they match in length
+stopifnot(length(bad_probes) == nrow(beta_values))
+
+#filter the beta values of the bad probes 
+beta_values <- beta_values[!bad_probes, , drop = FALSE ]
+final_probe_count <- nrow(beta_values)
+
+#log message of amount of probes removed from beta values 
+cat("Probes after alignment:", aligned_probe_count, "\n") ##confirms how many probes have been filtered outat each step
+cat("Canonical Cpg probes:", cpg_only_probe_count, "\n")
+cat("Removed by XY/SNP:", cpg_only_probe_count - final_probe_count, "out of", cpg_only_probe_count, "\n")
+cat("final probes retained:", final_probe_count, "\n")
+
+
+#Save results
+save(beta_values, targets, file="results/beta_values_filtered_EPIC_test_set.RData")    ##this saves the final preporcessed data - specificallty the filteres and batch corrected data values and the target metadata to a file called "beta_values_filtered.RData" inside the results directory.
+message("Preprocessing complete.", Sys.time())
+head(beta_values)
